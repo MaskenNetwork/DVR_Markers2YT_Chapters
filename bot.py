@@ -29,7 +29,10 @@ class Config:
         load_dotenv(dotenv_path)
 
         self.TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN")
+        self.PAYPAL_LINK: str = os.getenv("PAYPAL_LINK")
+        
         self.M_COLORS: List[str] = os.getenv("M_COLORS").split(',')
+        
         self.DATABASE_NAME: str = os.getenv("DATABASE_NAME")
         self.LOGFILE_NAME: str = os.getenv("LOGFILE_NAME")
 
@@ -49,6 +52,7 @@ class Config:
             "SEPARATOR_TIMEOUT_MESSAGE").format(ttl=self.GLOBAL_TTL)
         self.ERROR_MESSAGE: str = os.getenv("ERROR_MESSAGE")
         self.RAM_FULL_MESSAGE: str = os.getenv("RAM_FULL_MESSAGE")
+        
         self.START_MESSAGE: str = os.getenv("START_MESSAGE").format(
             MARKERS_COLOR_BUTTON=self.MARKERS_COLOR_BUTTON,
             CHAPTERS_SEPARATOR_BUTTON=self.CHAPTERS_SEPARATOR_BUTTON,
@@ -70,6 +74,7 @@ class Config:
             "CHAPTERS_SEPARATOR_UPDATED_MESSAGE")
         self.END_CONVERSATION_MESSAGE: str = os.getenv(
             "END_CONVERSATION_MESSAGE")
+        self.DONATE_MESSAGE: str = os.getenv("DONATE_MESSAGE")
 
 
 class DatabaseManager:
@@ -327,6 +332,13 @@ class DVChapterBot:
         message = self.config.HELP_MESSAGE
         await self.send_reply(update, message)
 
+    @handle_errors
+    @function_setup
+    async def donate_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        keyboard = [[InlineKeyboardButton("❤️ Donate via PayPal ❤️", url=self.config.PAYPAL_LINK)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(self.config.DONATE_MESSAGE, reply_markup=reply_markup)
+
     # --------------- CALLBACK HANDLERS ----------------
 
     @handle_errors
@@ -434,11 +446,14 @@ class DVChapterBot:
             ],
             conversation_timeout=self.config.GLOBAL_TTL
         )
+        donate_handler = CommandHandler("donate", self.donate_command)
+        
         self.application.add_handler(start_handler)
         self.application.add_handler(markers_color_handler)
         self.application.add_handler(chapters_separator_handler)
         self.application.add_handler(file_handler)
         self.application.add_handlers(help_handlers)
+        self.application.add_handler(donate_handler)
 
     def run(self):
         """Start the bot"""

@@ -64,3 +64,13 @@ python bot.py
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request or open an Issue.
+
+## Support the Project
+
+If you find this bot helpful and would like to support me, consider making a donation.
+
+<p>
+  <a href="https://paypal.me/maskennetwork" target="_blank">
+    <img src="https://img.shields.io/badge/Donate-PayPal-blue?style=for-the-badge&logo=paypal" alt="Donate via PayPal">
+  </a>
+</p>

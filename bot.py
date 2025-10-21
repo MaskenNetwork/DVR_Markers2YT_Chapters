@@ -153,19 +153,7 @@ def handle_errors(func):
             logger.error(
                 f"Error in {func.__name__} for {user_id}:", exc_info=True)
             error_message = self.config.ERROR_MESSAGE
-            reply_markup = None
-            try:
-                if update.effective_user:
-                    reply_markup = await self._create_reply_keyboard(user_id)
-            except Exception:
-                logger.error(
-                    f"Error at create reply keyboard for {user_id}:", exc_info=True)
-
-            if update.callback_query:
-                await update.callback_query.answer()
-                await update.callback_query.message.reply_text(error_message, reply_markup=reply_markup)
-            elif update.message:
-                await update.message.reply_text(error_message, reply_markup=reply_markup)
+            await self.send_reply(update, error_message)
 
             # If the handler is part of a Conversation, terminate it
             return ConversationHandler.END
@@ -335,9 +323,9 @@ class DVChapterBot:
     @handle_errors
     @function_setup
     async def donate_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        keyboard = [[InlineKeyboardButton("❤️ Donate via PayPal ❤️", url=self.config.PAYPAL_LINK)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(self.config.DONATE_MESSAGE, reply_markup=reply_markup)
+        inline_keyboard = [[InlineKeyboardButton("❤️ Donate via PayPal ❤️", url=self.config.PAYPAL_LINK)]]
+        inline_keyboard_markup = InlineKeyboardMarkup(inline_keyboard)
+        await self.send_reply(update, self.config.DONATE_MESSAGE, reply_markup=inline_keyboard_markup)
 
     # --------------- CALLBACK HANDLERS ----------------
 

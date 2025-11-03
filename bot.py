@@ -4,8 +4,10 @@ import os
 import psutil
 import re
 import sqlite3
+import asyncio
 from dotenv import load_dotenv
 from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from typing import List
 from telegram import Document, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, ConversationHandler, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -33,8 +35,8 @@ class Config:
         
         self.M_COLORS: List[str] = os.getenv("M_COLORS").split(',')
         
-        self.DATABASE_NAME: str = os.getenv("DATABASE_NAME")
-        self.LOGFILE_NAME: str = os.getenv("LOGFILE_NAME")
+        self.DATABASE_NAME: Path = Path(os.getenv("DATABASE_NAME"))
+        self.LOGFILE_NAME: Path = Path(os.getenv("LOGFILE_NAME"))
 
         self.MARKERS_COLOR_BUTTON: str = os.getenv("MARKERS_COLOR_BUTTON")
         self.CHAPTERS_SEPARATOR_BUTTON: str = os.getenv(
@@ -87,6 +89,14 @@ class DatabaseManager:
         self.conn.row_factory = sqlite3.Row
         self.create_db()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.conn:
+            self.conn.close()
+            logger.info("Database connection closed")
+
     def _execute(self, query, params=(), commit=False, fetchone=False, fetchall=False):
         try:
             with self.conn:
@@ -138,6 +148,12 @@ def setup_logging(logfile_name: str):
     httpx_logger = logging.getLogger("httpx")
     httpx_logger.addFilter(
         lambda record: "getUpdates" not in record.getMessage())
+
+
+async def keep_alive():
+    while True:
+        logger.info("Polling...")
+        await asyncio.sleep(600)
 
 
 def handle_errors(func):
@@ -225,37 +241,37 @@ class DVChapterBot:
             logger.warning(
                 f"send_reply: Could not find target message or user_id.")
 
-    async def _extract_chapters(self, user_id: int, file: Document) -> str:
-        choices = self.db.get_choices(user_id)
-        m_color = choices['m_color']
-        c_separator = choices['c_separator']
-
+    async def _process_edl_file(self, user_id: int, file: Document) -> str:
         file_prep = await file.get_file()
-        file_path = await file_prep.download_to_drive()
+        file_path = Path(await file_prep.download_to_drive())
 
-        result = ''
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
-                n_lines = len(lines)
-
-                if n_lines >= 6:
-                    results = ['CAPITOLI\n--------------------']
-                    for i in range(3, n_lines, 3):
-                        if f'C:ResolveColor{m_color}' in lines[i+1]:
-                            m_time = re.search(r"\d{2}:\d{2}:\d{2}", lines[i])
-                            m_name = re.search(r"\|M:(.*?) \|D:", lines[i+1])
-                            if m_time and m_name:
-                                results.append(
-                                    f'{m_time.group(0)} {c_separator} {m_name.group(1)}')
-                    if len(results) > 1:
-                        result = '\n'.join(results)
-                else:
-                    result = ''
+                return self._format_chapters(user_id, lines)
         finally:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        return result
+            if file_path.exists():
+                file_path.unlink()
+
+    def _format_chapters(self, user_id: int, lines: List[str]) -> str:
+        choices = self.db.get_choices(user_id)
+        m_color = choices['m_color']
+        c_separator = choices['c_separator']
+        n_lines = len(lines)
+
+        if n_lines < 6:
+            return ''
+
+        results = ['CAPITOLI\n--------------------']
+        for i in range(3, n_lines, 3):
+            if f'C:ResolveColor{m_color}' in lines[i+1]:
+                m_time = re.search(r"\d{2}:\d{2}:\d{2}", lines[i])
+                m_name = re.search(r"\|M:(.*?) \|D:", lines[i+1])
+                if m_time and m_name:
+                    results.append(
+                        f'{m_time.group(0)} {c_separator} {m_name.group(1)}')
+
+        return '\n'.join(results) if len(results) > 1 else ''
 
     async def _free_memory_check(self, update: Update) -> bool:
         user_id = update.effective_user.id
@@ -305,8 +321,8 @@ class DVChapterBot:
             return
 
         file = update.message.document
-        if os.path.splitext(file.file_name)[1] == '.edl':
-            result = await self._extract_chapters(update.effective_user.id, file)
+        if Path(file.file_name).suffix == '.edl':
+            result = await self._process_edl_file(update.effective_user.id, file)
             if result:
                 await self.send_reply(update, result)
             else:
@@ -373,17 +389,8 @@ class DVChapterBot:
 
     # --------------- BOT SETUP ----------------
 
-    def _setup_handlers(self):
-        # Command handlers
-        start_handler = CommandHandler("start", self.start_command)
-        file_handler = MessageHandler(
-            filters.ATTACHMENT, self.upload_file_command)
-        help_handlers = [
-            CommandHandler("help", self.help_command),
-            MessageHandler(filters.Regex(
-                f"^{self.config.HELP_BUTTON}$"), self.help_command)
-        ]
-        markers_color_handler = ConversationHandler(
+    def _setup_markers_color_handler(self) -> ConversationHandler:
+        return ConversationHandler(
             entry_points=[
                 CommandHandler("color", self.change_markers_color_command),
                 MessageHandler(filters.Regex(
@@ -407,7 +414,9 @@ class DVChapterBot:
             ],
             conversation_timeout=self.config.GLOBAL_TTL
         )
-        chapters_separator_handler = ConversationHandler(
+
+    def _setup_chapters_separator_handler(self) -> ConversationHandler:
+        return ConversationHandler(
             entry_points=[
                 CommandHandler(
                     "separator", self.change_chapters_separator_command),
@@ -434,8 +443,23 @@ class DVChapterBot:
             ],
             conversation_timeout=self.config.GLOBAL_TTL
         )
+
+    def _setup_handlers(self):
+        # Command handlers
+        start_handler = CommandHandler("start", self.start_command)
+        file_handler = MessageHandler(
+            filters.ATTACHMENT, self.upload_file_command)
+        help_handlers = [
+            CommandHandler("help", self.help_command),
+            MessageHandler(filters.Regex(
+                f"^{self.config.HELP_BUTTON}$"), self.help_command)
+        ]
         donate_handler = CommandHandler("donate", self.donate_command)
-        
+
+        # Conversation handlers
+        markers_color_handler = self._setup_markers_color_handler()
+        chapters_separator_handler = self._setup_chapters_separator_handler()
+
         self.application.add_handler(start_handler)
         self.application.add_handler(markers_color_handler)
         self.application.add_handler(chapters_separator_handler)
@@ -443,22 +467,38 @@ class DVChapterBot:
         self.application.add_handlers(help_handlers)
         self.application.add_handler(donate_handler)
 
-    def run(self):
+    async def run(self):
         """Start the bot"""
         logger.info("Handler setup...")
         self._setup_handlers()
 
-        logger.info("Bot startup (polling)...")
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        app = self.application
+        try:
+            logger.info("Bot startup...")
+            await asyncio.gather(app.initialize())
+            await asyncio.gather(app.start())
+            await asyncio.gather(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            logger.info("Bot run cancelled")
+        finally:
+            logger.info("Bot shutdown...")
+            await asyncio.gather(app.updater.stop())
+            await asyncio.gather(app.stop())
+            await asyncio.gather(app.shutdown())
 
 
-def main() -> None:
+async def main() -> None:
     try:
         config = Config()
         setup_logging(config.LOGFILE_NAME)
-        db = DatabaseManager(config.DATABASE_NAME)
-        bot = DVChapterBot(config, db)
-        bot.run()
+        with DatabaseManager(config.DATABASE_NAME) as db:
+            bot = DVChapterBot(config, db)
+            
+            loop = asyncio.get_event_loop()
+            loop.create_task(keep_alive())
+            
+            await bot.run()
 
     except ValueError as e:
         logger.critical(f"Configuration error: {e}")
@@ -467,4 +507,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutdown forced by user.")

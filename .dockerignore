@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.template
+.git
+.gitignore
+.md
+.png
+.venv
+.vscode
+.yml
+*.db
+*.log*
+*pycache*
+Dockerfile

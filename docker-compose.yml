@@ -1,0 +1,18 @@
+services:
+  bot:
+    build: "https://github.com/MaskenNetwork/DVR_Markers2YT_Chapters"
+    container_name: dvr-markers-2-yt-chapters-bot
+    restart: always
+    volumes:
+      - /DATA/AppData/dvr-markers-2-yt-chapters-bot/bot.db:/app/bot.db
+      - /DATA/AppData/dvr-markers-2-yt-chapters-bot/bot.log:/app/bot.log
+      - /DATA/AppData/dvr-markers-2-yt-chapters-bot/.env:/app/.env
+    x-casaos:
+      icon: "https://raw.githubusercontent.com/MaskenNetwork/DVR_Markers2YT_Chapters/main/bot_propic.png"
+      title:
+        en_us: "DVR Markers 2 YT Chapters Bot"
+      description:
+        en_us: "A telegram bot that converts your DaVinci Resolve .edl markers file into a formatted list of YouTube chapters."
+      main: bot
+      category: "Utility"
+      author: "MaskenNetwork"

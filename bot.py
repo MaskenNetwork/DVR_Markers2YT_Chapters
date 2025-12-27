@@ -4,8 +4,8 @@ import os
 import psutil
 import re
 import sqlite3
-import asyncio
 from dotenv import load_dotenv
+from httpx import AsyncClient, HTTPStatusError
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import List
@@ -32,6 +32,7 @@ class Config:
 
         self.TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN")
         self.PAYPAL_LINK: str = os.getenv("PAYPAL_LINK")
+        self.API_URL: str = os.getenv("API_URL").format(bot_token=self.TELEGRAM_BOT_TOKEN)
         
         self.M_COLORS: List[str] = os.getenv("M_COLORS").split(',')
         
@@ -44,6 +45,7 @@ class Config:
         self.HELP_BUTTON: str = os.getenv("HELP_BUTTON")
 
         self.GLOBAL_TTL: int = int(os.getenv("GLOBAL_TTL"))
+        self.KEEP_ALIVE_INTERVAL: int = int(os.getenv("KEEP_ALIVE_INTERVAL"))
         self.RAM_THRESHOLD: int = int(os.getenv("RAM_THRESHOLD"))
 
         self.MARKERS_COLOR_PATTERN: str = os.getenv("MARKERS_COLOR_PATTERN")
@@ -90,6 +92,7 @@ class DatabaseManager:
         self.create_db()
 
     def __enter__(self):
+        logger.info("Database connection opened")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -130,7 +133,7 @@ class DatabaseManager:
         'UPDATE choices SET c_separator = ? WHERE user_id = ?', (c_separator, user_id), commit=True)
 
 
-def setup_logging(logfile_name: str):
+def setup_logging(logfile_name: str, bot_token: str):
     """Configures root-level logging."""
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -146,15 +149,8 @@ def setup_logging(logfile_name: str):
         ]
     )
     httpx_logger = logging.getLogger("httpx")
-    httpx_logger.addFilter(
-        lambda record: "getUpdates" not in record.getMessage())
-
-
-async def keep_alive():
-    while True:
-        logger.info("Polling...")
-        await asyncio.sleep(600)
-
+    httpx_logger.addFilter(lambda record: bot_token not in record.getMessage())
+    
 
 def handle_errors(func):
     """
@@ -165,9 +161,9 @@ def handle_errors(func):
         user_id = update.effective_user.id if update.effective_user else "N/A"
         try:
             return await func(self, update, context, *args, **kwargs)
-        except Exception:
+        except Exception as e:
             logger.error(
-                f"Error in {func.__name__} for {user_id}:", exc_info=True)
+                f"Error in {func.__name__} for {user_id}: {e}", exc_info=True)
             error_message = self.config.ERROR_MESSAGE
             await self.send_reply(update, error_message)
 
@@ -199,9 +195,10 @@ class DVChapterBot:
     TIMEOUT = ConversationHandler.TIMEOUT
     END = ConversationHandler.END
 
-    def __init__(self, config: Config, db_manager: DatabaseManager):
+    def __init__(self, config: Config, db_manager: DatabaseManager, client: AsyncClient):
         self.config = config
         self.db = db_manager
+        self.client = client
         self.application = Application.builder().token(
             self.config.TELEGRAM_BOT_TOKEN).build()
 
@@ -238,7 +235,7 @@ class DVChapterBot:
             kwargs.setdefault('reply_markup', reply_keyboard_markup)
             await target_message.reply_text(text, **kwargs)
         else:
-            logger.warning(
+            logger.error(
                 f"send_reply: Could not find target message or user_id.")
 
     async def _process_edl_file(self, user_id: int, file: Document) -> str:
@@ -248,6 +245,8 @@ class DVChapterBot:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
+                if not lines:
+                    return ''
                 return self._format_chapters(user_id, lines)
         finally:
             if file_path.exists():
@@ -282,6 +281,21 @@ class DVChapterBot:
             await self.send_reply(update, self.config.RAM_FULL_MESSAGE)
             return False
         return True
+    
+    async def _keep_alive(self, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            response = await self.client.get(self.config.API_URL)
+            response.raise_for_status()
+            bot_info = response.json()
+            username = bot_info.get("result", {}).get("username")
+            if username:
+                logger.info(f"{username} alive")
+            else:
+                logger.error(f"Error in _keep_alive: 'username' not found in response: {bot_info}", exc_info=True)
+        except HTTPStatusError as e:
+            logger.error(f"HTTP error in _keep_alive: {e.response.status_code} - {e.response.text}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error in _keep_alive: {e}", exc_info=True)
 
     # --------------- COMMAND HANDLERS ----------------
 
@@ -296,14 +310,9 @@ class DVChapterBot:
     async def change_markers_color_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         colors = self.config.M_COLORS
         inline_keyboard = [
-            [InlineKeyboardButton(colors[i], callback_data=f'{colors[i]}'),
-             InlineKeyboardButton(colors[i+1], callback_data=f'{colors[i+1]}')]
+            [InlineKeyboardButton(color, callback_data=color) for color in colors[i:i+2]]
             for i in range(0, len(colors), 2)
         ]
-        if len(colors) % 2 != 0:
-            inline_keyboard.append([InlineKeyboardButton(
-                colors[-1], callback_data=f'{colors[-1]}')])
-
         inline_keyboard_markup = InlineKeyboardMarkup(inline_keyboard)
         await self.send_reply(update, self.config.SELECT_MARKERS_COLOR_MESSAGE, reply_markup=inline_keyboard_markup)
         return self.CHANGE_MARKERS_COLOR
@@ -374,17 +383,13 @@ class DVChapterBot:
     @handle_errors
     @function_setup
     async def color_timeout_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        message = self.config.COLOR_TIMEOUT_MESSAGE.format(
-            ttl=self.config.GLOBAL_TTL)
-
+        message = self.config.COLOR_TIMEOUT_MESSAGE
         await self.send_reply(update, message)
 
     @handle_errors
     @function_setup
     async def separator_timeout_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        message = self.config.SEPARATOR_TIMEOUT_MESSAGE.format(
-            ttl=self.config.GLOBAL_TTL)
-
+        message = self.config.SEPARATOR_TIMEOUT_MESSAGE
         await self.send_reply(update, message)
 
     # --------------- BOT SETUP ----------------
@@ -467,47 +472,38 @@ class DVChapterBot:
         self.application.add_handlers(help_handlers)
         self.application.add_handler(donate_handler)
 
-    async def run(self):
+    def run(self):
         """Start the bot"""
         logger.info("Handler setup...")
         self._setup_handlers()
 
         app = self.application
+        
+        j = app.job_queue
+        j.run_repeating(self._keep_alive, interval=self.config.KEEP_ALIVE_INTERVAL, first=0)
+        
         try:
             logger.info("Bot startup...")
-            await asyncio.gather(app.initialize())
-            await asyncio.gather(app.start())
-            await asyncio.gather(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
-            await asyncio.Future()
-        except asyncio.CancelledError:
-            logger.info("Bot run cancelled")
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+        except Exception as e:
+            logger.error(f"Exception at bot run: {e}", exc_info=True)
         finally:
             logger.info("Bot shutdown...")
-            await asyncio.gather(app.updater.stop())
-            await asyncio.gather(app.stop())
-            await asyncio.gather(app.shutdown())
 
 
-async def main() -> None:
+def main() -> None:
     try:
         config = Config()
-        setup_logging(config.LOGFILE_NAME)
+        client = AsyncClient()
+        setup_logging(config.LOGFILE_NAME, config.TELEGRAM_BOT_TOKEN)
         with DatabaseManager(config.DATABASE_NAME) as db:
-            bot = DVChapterBot(config, db)
-            
-            loop = asyncio.get_event_loop()
-            loop.create_task(keep_alive())
-            
-            await bot.run()
-
+            bot = DVChapterBot(config, db, client)
+            bot.run()
     except ValueError as e:
-        logger.critical(f"Configuration error: {e}")
+        logger.error(f"Configuration error: {e}", exc_info=True)
     except Exception as e:
-        logger.critical("Critical error during bot startup:", exc_info=True)
+        logger.error(f"Error during bot startup: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot shutdown forced by user.")
+    main()

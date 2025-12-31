@@ -11,5 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
+# Make the entrypoint script executable
+RUN chmod +x entrypoint.sh
+
+# Set the entrypoint script
+ENTRYPOINT ["./entrypoint.sh"]
+
 # Command to run the bot
 CMD ["python", "bot.py"]

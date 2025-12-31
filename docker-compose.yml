@@ -16,6 +16,6 @@ services:
     container_name: dvr-markers-2-yt-chapters-bot
     restart: unless-stopped
     volumes:
-      - /DATA/AppData/dvr-markers-2-yt-chapters-bot/bot.db:/app/bot.db
-      - /DATA/AppData/dvr-markers-2-yt-chapters-bot/bot.log:/app/bot.log
-      - /DATA/AppData/dvr-markers-2-yt-chapters-bot/.env:/app/.env
+      - /DATA/AppData/DVR_Markers2YT_Chapters/bot.db:/app/bot.db
+      - /DATA/AppData/DVR_Markers2YT_Chapters/bot.log:/app/bot.log
+      - /DATA/AppData/DVR_Markers2YT_Chapters/.env:/app/.env
